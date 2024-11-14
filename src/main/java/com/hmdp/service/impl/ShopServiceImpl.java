@@ -1,19 +1,25 @@
 package com.hmdp.service.impl;
 
+import ch.qos.logback.classic.spi.EventArgUtil;
 import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
+import com.hmdp.utils.RedisData;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 
+import java.time.LocalDateTime;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.*;
@@ -32,7 +38,10 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     private StringRedisTemplate stringRedisTemplate;
     @Override
     public Result queryById(Long id) {
-        Shop shop = queryWithMutex( id );
+//        互斥锁解决缓存击穿问题
+//        Shop shop = queryWithMutex( id );
+        //逻辑过期解决缓存穿透问题
+        Shop shop = queryWithLogicalExpire(id);
         if ( shop == null){
             return Result.fail("shop not found");
         }
@@ -96,10 +105,53 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //redis中存储的json数据，有3种可能，存在不为空，存在但为""，不存在为null
         String shopJson = stringRedisTemplate.opsForValue().get(key);
         //存在不为空
+        if(StrUtil.isBlank(shopJson)){
+            //2.如果缓存中有数据，则直接返回缓存数据
+            return null;
+        }
+        //命中 将json转化为对象
+        RedisData redisData = JSONUtil.toBean(shopJson, RedisData.class);
+        JSONObject data =(JSONObject) redisData.getData();
+        Shop shop = JSONUtil.toBean(data, Shop.class);
+        //判断是否过期
+        LocalDateTime expireTime = redisData.getExpireTime();
+        if(expireTime.isAfter(LocalDateTime.now())){
+            //未过期 直接返回店铺信息
+            return shop;
+        }
+
+        //已过期 需要缓存重建
+        //获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        boolean isLock = tryLock(lockKey);
+        //获取锁成功 开启独立线程 进行缓存重建
+        if(isLock){
+            //TODO: 缓存重建逻辑
+            CACHE_REBUILD_EXECUTOR.submit(()->{
+                try {
+                    this.saveShop2Redis(id, 20L);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    unlock(lockKey);
+                }
+            });
+        }
+        //获取锁失败 返回过期的店铺信息信息
+        return shop;
+    }
+    //线程池
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    //逻辑过期查询缓存
+    public Shop queryWithLogicalExpire(Long id){
+        String key = CACHE_SHOP_KEY + id;
+        //1.从redis中查询缓存
+        //redis中存储的json数据，有3种可能，存在不为空，存在但为""，不存在为null
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+        //存在不为空
         if(StrUtil.isNotBlank(shopJson)){
             //2.如果缓存中有数据，则直接返回缓存数据
-            Shop shop = JSONUtil.toBean(shopJson, Shop.class);
-            return shop;
+            return JSONUtil.toBean(shopJson, Shop.class);
         }
         //存在但为“”
         if(shopJson != null){
@@ -123,6 +175,15 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     private void unlock(String key) {
         stringRedisTemplate.delete(key);
     }
+    public void saveShop2Redis(Long id,Long expireTime) throws InterruptedException {
+        Shop shop = getById(id);
+        Thread.sleep(200);
+        RedisData redisData = new RedisData();
+        redisData.setData(shop);
+        redisData.setExpireTime(LocalDateTime.now().plusSeconds(expireTime));
+        stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(redisData));
+    }
+
     @Override
     @Transactional
     public Result update(Shop shop) {
