@@ -1,6 +1,5 @@
 package com.hmdp.service.impl;
 
-import ch.qos.logback.classic.spi.EventArgUtil;
 import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
@@ -98,15 +97,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 最终把查询到的商户信息返回给前端
         return shop;
     }
-    //缓存穿透
-    public Shop queryWithPassThrough(Long id){
+    //逻辑过期查询缓存
+    public Shop queryWithLogicalExpire(Long id){
         String key = CACHE_SHOP_KEY + id;
         //1.从redis中查询缓存
-        //redis中存储的json数据，有3种可能，存在不为空，存在但为""，不存在为null
         String shopJson = stringRedisTemplate.opsForValue().get(key);
-        //存在不为空
+        //存在为空
         if(StrUtil.isBlank(shopJson)){
-            //2.如果缓存中有数据，则直接返回缓存数据
             return null;
         }
         //命中 将json转化为对象
@@ -119,7 +116,6 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             //未过期 直接返回店铺信息
             return shop;
         }
-
         //已过期 需要缓存重建
         //获取互斥锁
         String lockKey = LOCK_SHOP_KEY + id;
@@ -142,8 +138,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     }
     //线程池
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
-    //逻辑过期查询缓存
-    public Shop queryWithLogicalExpire(Long id){
+    //缓存穿透查询缓存
+    public Shop queryWithPassThrough(Long id){
         String key = CACHE_SHOP_KEY + id;
         //1.从redis中查询缓存
         //redis中存储的json数据，有3种可能，存在不为空，存在但为""，不存在为null
