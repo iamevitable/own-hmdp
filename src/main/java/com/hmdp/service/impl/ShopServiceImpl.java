@@ -9,6 +9,7 @@ import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
+import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisData;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -35,18 +36,25 @@ import static com.hmdp.utils.RedisConstants.*;
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private CacheClient cacheClient;
     @Override
     public Result queryById(Long id) {
+//        逻辑过期解决缓存击穿问题
+        Shop shop = cacheClient
+                .queryWithLogicalExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+//        解决缓存穿透
+//        Shop shop = cacheClient.queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
 //        互斥锁解决缓存击穿问题
 //        Shop shop = queryWithMutex( id );
-        //逻辑过期解决缓存穿透问题
-        Shop shop = queryWithLogicalExpire(id);
+//        逻辑过期解决缓存击穿问题
+//        Shop shop = queryWithLogicalExpire(id);
         if ( shop == null){
             return Result.fail("shop not found");
         }
         return Result.ok(shop);
     }
-    //互斥锁查询缓存
+    //互斥锁
     public Shop queryWithMutex(Long id){
         String lockKey = LOCK_SHOP_KEY + id;
         //1.先从Redis中查询对应的店铺缓存信息，这里的常量值是固定的店铺前缀+查询店铺的Id
@@ -73,7 +81,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                 return queryWithMutex(id);
             }
 
-            // todo: 再次检测Redis中缓存的信息是否存在,如果存在则无需重建缓存
+            // 再次检测Redis中缓存的信息是否存在,如果存在则无需重建缓存
             // ........................
 
             //4.4 获取锁成功(插入key成功),则根据店铺的Id查询数据库
@@ -97,7 +105,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 最终把查询到的商户信息返回给前端
         return shop;
     }
-    //逻辑过期查询缓存
+    //逻辑过期
     public Shop queryWithLogicalExpire(Long id){
         String key = CACHE_SHOP_KEY + id;
         //1.从redis中查询缓存
@@ -122,7 +130,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         boolean isLock = tryLock(lockKey);
         //获取锁成功 开启独立线程 进行缓存重建
         if(isLock){
-            //TODO: 缓存重建逻辑
+            //
             CACHE_REBUILD_EXECUTOR.submit(()->{
                 try {
                     this.saveShop2Redis(id, 20L);
