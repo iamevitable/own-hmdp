@@ -1,5 +1,6 @@
 package com.hmdp.utils;
 
+import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.BooleanUtil;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -12,6 +13,7 @@ public class SimpleRedisLock implements ILock {
     private StringRedisTemplate stringRedisTemplate;
 
     private static final String KEY_PREFIX = "lock:";
+    private static final String ID_PREFIX = UUID.randomUUID().toString(true) + "-";
     public SimpleRedisLock(String name, StringRedisTemplate stringRedisTemplate) {
         this.name = name;
         this.stringRedisTemplate = stringRedisTemplate;
@@ -19,7 +21,7 @@ public class SimpleRedisLock implements ILock {
 
     @Override
     public boolean tryLock(long timeoutSec) {
-        long threadId = Thread.currentThread().getId();
+        String threadId =ID_PREFIX + Thread.currentThread().getId();
         Boolean success = stringRedisTemplate.opsForValue().setIfAbsent(KEY_PREFIX + name, threadId + "", timeoutSec, TimeUnit.SECONDS);
         return Boolean.TRUE.equals(success);
 //        return BooleanUtil.isTrue(success);
@@ -27,6 +29,11 @@ public class SimpleRedisLock implements ILock {
 
     @Override
     public void unlock() {
-        stringRedisTemplate.delete(KEY_PREFIX + name);
+        String threadId =ID_PREFIX + Thread.currentThread().getId();
+        String id = stringRedisTemplate.opsForValue().get(KEY_PREFIX + name);
+        if(threadId.equals(id)){
+            stringRedisTemplate.delete(KEY_PREFIX + name);
+        }
+
     }
 }
