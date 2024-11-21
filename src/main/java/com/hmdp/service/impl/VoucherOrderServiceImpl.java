@@ -16,12 +16,15 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.boot.autoconfigure.cache.CacheProperties;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.util.Collections;
 
 /**
  * <p>
@@ -41,38 +44,65 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private StringRedisTemplate stringRedisTemplate;
     @Resource
     private RedissonClient redissonClient;
+//    @Override
+//    public Result seckillVoucher(Long voucherId) {
+//        //1.查询优惠卷
+//        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+//        //2.判断优惠卷是否开始和结束
+//        if(voucher.getBeginTime().isAfter(LocalDateTime.now())){
+//            return Result.fail("秒杀未开始");
+//        }
+//        if(voucher.getEndTime().isBefore(LocalDateTime.now())){
+//            return Result.fail("秒杀已结束");
+//        }
+//        //3.判断优惠卷是否已经被抢完
+//        if(voucher.getStock() < 1){
+//            return Result.fail("优惠卷已被抢完");
+//        }
+//        Long userId = UserHolder.getUser().getId();
+////        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+////        boolean isLock = lock.tryLock(1200);
+//        RLock lock = redissonClient.getLock("lock:order" + userId);
+//        boolean isLock = lock.tryLock();
+//        if(!isLock){
+//            return Result.fail("不允许重复下单");
+//        }
+//        try {
+//            //这里如果直接返回createVoucherOrder(voucherId) 即调用了this方法 又因为this方法没有使用动态代理
+//            //所以无法提交事务 所以要使用AopContext创建一个动态代理出来 这样才能提交事务
+//            IVoucherOrderService proxy =(IVoucherOrderService) AopContext.currentProxy();
+//            return proxy.createVoucherOrder(voucherId);
+//        } finally {
+//            lock.unlock();
+//        }
+//    }
+    private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    static {
+        SECKILL_SCRIPT =new DefaultRedisScript<>();
+        SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
+        SECKILL_SCRIPT.setResultType(Long.class);
+    }
     @Override
     public Result seckillVoucher(Long voucherId) {
-        //1.查询优惠卷
-        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
-        //2.判断优惠卷是否开始和结束
-        if(voucher.getBeginTime().isAfter(LocalDateTime.now())){
-            return Result.fail("秒杀未开始");
-        }
-        if(voucher.getEndTime().isBefore(LocalDateTime.now())){
-            return Result.fail("秒杀已结束");
-        }
-        //3.判断优惠卷是否已经被抢完
-        if(voucher.getStock() < 1){
-            return Result.fail("优惠卷已被抢完");
-        }
+        //获取用户
         Long userId = UserHolder.getUser().getId();
-//        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
-//        boolean isLock = lock.tryLock(1200);
-        RLock lock = redissonClient.getLock("lock:order" + userId);
-        boolean isLock = lock.tryLock();
-        if(!isLock){
-            return Result.fail("不允许重复下单");
+        //执行lua脚本
+        Long result = stringRedisTemplate.execute(
+                SECKILL_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString()
+        );
+        //判断结果为0
+        int res = result.intValue();
+        if(res != 0){
+            return Result.fail(res == 1 ? "库存不足" : "不能重复下单");
         }
-        try {
-            //这里如果直接返回createVoucherOrder(voucherId) 即调用了this方法 又因为this方法没有使用动态代理
-            //所以无法提交事务 所以要使用AopContext创建一个动态代理出来 这样才能提交事务
-            IVoucherOrderService proxy =(IVoucherOrderService) AopContext.currentProxy();
-            return proxy.createVoucherOrder(voucherId);
-        } finally {
-            lock.unlock();
-        }
-
+        //不为0  代表没有购买资格
+        //TODO 保存阻塞队列
+        long orderId = redisIdWorker.nextId("order");
+        //返回订单id
+        return Result.ok(orderId);
     }
     @Transactional
     public Result createVoucherOrder(Long voucherId) {
